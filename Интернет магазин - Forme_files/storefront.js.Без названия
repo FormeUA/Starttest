@@ -1,0 +1,106 @@
+var viewInvoiceConfig = Ecwid.getAppPublicConfig('print-invoice');
+viewInvoiceConfig = JSON.parse(viewInvoiceConfig);
+
+if (viewInvoiceConfig.enabled == 'true'){
+
+Ecwid.OnAPILoaded.add(function(){
+
+var viewInvoiceEmail = '';
+var viewInvoiceOrderNumber = '';
+var viewInvoiceCustomerId = '';
+
+var buttonTranslations = {
+    ru: 'Распечатать счет',
+    en: 'Print receipt',
+    fr: 'Imprimer la facture',
+    de: 'Rechnung drucken',
+    it: 'Stampa la fattura',
+    es: 'Imprimir factura',
+    es_419: 'Imprimir factura'
+};
+
+Ecwid.OnSetProfile.add(function(customer) {
+    if (customer !== null){
+        viewInvoiceEmail = encodeURIComponent(customer.email);
+        viewInvoiceCustomerId = customer.id;
+    } else {
+        return;
+    }
+})
+
+var viewInvoiceStoreId = Ecwid.getOwnerId();
+
+function openWindowWithPost(URL, orderNumber, viewInvoiceEmail) {
+    window.open(URL, 'view');
+
+    var form = document.createElement("form");
+    form.setAttribute("method", "post");
+    form.setAttribute("action", URL);
+    form.setAttribute("target", "view");
+
+    var hiddenField = document.createElement("input"); 
+    hiddenField.setAttribute("type", "hidden");
+    hiddenField.setAttribute("name", "storeId");
+    hiddenField.setAttribute("value", viewInvoiceStoreId);
+    form.appendChild(hiddenField);
+    document.body.appendChild(form);
+
+    var hiddenField1 = document.createElement("input"); 
+    hiddenField1.setAttribute("type", "hidden");
+    hiddenField1.setAttribute("name", "orderNumber");
+    hiddenField1.setAttribute("value", orderNumber);
+    form.appendChild(hiddenField1);
+    document.body.appendChild(form);
+
+    var hiddenField2 = document.createElement("input"); 
+    hiddenField2.setAttribute("type", "hidden");
+    hiddenField2.setAttribute("name", "email");
+    hiddenField2.setAttribute("value", viewInvoiceEmail);
+    form.appendChild(hiddenField2);
+    document.body.appendChild(form);
+
+    var hiddenField3 = document.createElement("input"); 
+    hiddenField3.setAttribute("type", "hidden");
+    hiddenField3.setAttribute("name", "customerId");
+    hiddenField3.setAttribute("value", viewInvoiceCustomerId);
+    form.appendChild(hiddenField3);
+    document.body.appendChild(form);
+
+    form.submit();
+}
+
+function addButton(orderNumber, i) {
+
+    var URL = 'https://print-invoice.ecwid.com/webhooks.php';
+    var orderButton = document.createElement('button');
+    viewInvoiceLang = Ecwid.getStorefrontLang();
+
+    if (viewInvoiceLang in buttonTranslations){
+        orderButton.innerHTML = buttonTranslations[viewInvoiceLang];
+    } else {
+        orderButton.innerHTML = buttonTranslations.en;
+    }
+    
+    orderButton.addEventListener('click', function(){
+        openWindowWithPost(URL, orderNumber, viewInvoiceEmail);
+    })
+    orderButton.setAttribute('class','ecwid-btn ecwid-btn--secondary view-invoice');
+
+    document.querySelector('div.ecwid-OrdersList table:nth-child('+(i+1)+') td.ecwid-OrdersList-OrderBox-header-orderdescr div:nth-child(1)').appendChild(orderButton);
+}
+
+   Ecwid.OnPageLoaded.add(function(page){
+        if (page.type == 'ORDERS' && viewInvoiceCustomerId !== null) {
+            if (document.querySelectorAll('div.ecwid-OrdersList table.ecwid-OrdersList-OrderBox').length > 0) {
+                for (i=0; i < document.querySelectorAll('div.ecwid-OrdersList table.ecwid-OrdersList-OrderBox').length; i++){
+                    var orderNumber = document.querySelector('div.ecwid-OrdersList table:nth-child('+(i+1)+') td.ecwid-OrdersList-OrderBox-header-orderdescr span').innerHTML;
+                    addButton(orderNumber, i);
+                }
+            }
+        }
+    })
+
+
+})
+
+}

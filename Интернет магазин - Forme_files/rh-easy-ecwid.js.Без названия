@@ -1,0 +1,746 @@
+(function () {
+
+    var PLATFORM = {'ECWID': 1, 'SHOPIFY': 2};
+    var PAGE_TYPE = {'PRODUCT_PAGE': 1, 'CATEGORY_PAGE': 2, 'CONFIRMATION_PAGE': 3, 'UNKNOWN': 4};
+    var EVENTS = {
+        PRODUCT_VIEW: {eventName: 'page_view', fbEventName: 'ViewContent', cookieName: 'product', cookieExpiration: 60 * 60},    //1 hour
+        ADD_TO_CART: {eventName: 'add_to_cart', fbEventName: 'AddToCart', cookieName: 'cart', cookieExpiration: 60 * 60},    //1 hour
+        PURCHASE: {eventName: 'purchase', fbEventName: 'Purchase', cookieName: 'purchase', cookieExpiration: 24 * 60 * 60 * 30}  //30 days
+    };
+    var MARKETING_PLATFORM = {'GOOGLE': 'GOOGLE', 'FACEBOOK': 'FACEBOOK'};
+    var VERSIONS_WITH_ECWID_PIXEL_INSERTED = ['V_1', 'V_2'];
+    var VIEWED_PRODUCT_IDS = [];
+    var CART_PRODUCT_IDS = [];
+    var PURCHASE_PRODUCT_IDS = [];
+    var LOADED_SCRIPTS = [];
+    var RH_EASY_COOKIE_NAME = 'rh_conversion_ids';
+    var ECWID_PIXEL_IDENTIFICATION_PARAMETER = ',{},{agent:\'plecwid\'}';
+    var FB_PIXEL_INJECTED;
+
+    main();
+
+    function main() {
+        if (getPlatform() === PLATFORM.ECWID) {
+            Ecwid.OnPageLoaded.add(function (page) {
+
+                initCookies();
+
+                if (getPageType(page) === PAGE_TYPE.PRODUCT_PAGE) {
+                    var productDetail = getProductDetail(page);
+
+                    trackViewContent(productDetail);
+                    trackViewContentFacebook(productDetail);
+
+                    Ecwid.OnProductOptionsChanged.add(function (productId) {
+                        var productOptionDetail = {};
+                        productOptionDetail.productId = productId;
+                        trackViewContent(productOptionDetail);
+                        trackViewContentFacebook(productOptionDetail);
+                    });
+                }
+
+                Ecwid.OnCartChanged.add(function (cart) {
+                    trackAddToCart(cart);
+                    trackAddToCartFacebook(cart);
+                });
+
+                Ecwid.OnOrderPlaced.add(function (order) {
+                    trackPurchase(order);
+                    trackPurchaseFacebook(order);
+                });
+            });
+        }
+    }
+
+    /**
+     * Detect plugin platform.
+     * @returns {number}
+     */
+    function getPlatform() {
+
+        if (typeof Ecwid === 'object') {
+            return PLATFORM.ECWID;
+        } else if (typeof Shopify === 'object') {
+            return PLATFORM.SHOPIFY;
+        } else {
+            throw new Error('Unsupported platform initialization - platform was not detected.');
+        }
+    }
+
+    /**
+     * Page type detection
+     * @param page For ecwid pass page object after OnPageLoaded.
+     * @returns {number}
+     */
+    function getPageType(page) {
+
+        if (getPlatform() === PLATFORM.ECWID) {
+            switch (page.type) {
+                case 'PRODUCT':
+                    return PAGE_TYPE.PRODUCT_PAGE;
+                case 'CATEGORY':
+                    return PAGE_TYPE.CATEGORY_PAGE;
+                case 'ORDER_CONFIRMATION':
+                    return PAGE_TYPE.CONFIRMATION_PAGE;
+                default:
+                    return PAGE_TYPE.UNKNOWN;
+            }
+
+        } else {
+            throw new Error('Unsupported platform ' + getPlatform() + ' when getting page type.');
+        }
+    }
+
+    /**
+     * Product detail from product page
+     * @param page For ecwid pass page object after OnPageLoaded.
+     * @returns {{productId: *}}
+     */
+    function getProductDetail(page) {
+
+        if (getPageType(page) !== PAGE_TYPE.PRODUCT_PAGE) {
+            throw new Error('Product detail is supported only on product page but was ' + getPageType(page));
+        }
+
+        if (getPlatform() === PLATFORM.ECWID) {
+            return {'productId': page.productId};
+        } else {
+            throw new Error('Unsupported platform ' + getPlatform() + ' when getting page type.');
+        }
+    }
+
+    /**
+     * Send event with product to google once.
+     * @param productDetail
+     */
+    function trackViewContent(productDetail) {
+
+        if (getGoogleConversionId() == null || productDetail.productId <= 0) {
+            return;
+        }
+
+        if (storageContains(EVENTS.PRODUCT_VIEW, productDetail.productId, MARKETING_PLATFORM.GOOGLE)) {
+            return;
+        }
+        pushIntoStorage(EVENTS.PRODUCT_VIEW, productDetail.productId, MARKETING_PLATFORM.GOOGLE);
+        trackEventOnGoogle(EVENTS.PRODUCT_VIEW, productDetailToEvent(PAGE_TYPE.PRODUCT_PAGE, productDetail, MARKETING_PLATFORM.GOOGLE));
+    }
+
+    /**
+     * Send event with product to facebook once.
+     * @param productDetail
+     */
+    function trackViewContentFacebook(productDetail) {
+        if (getFacebookPixelId() == null || productDetail.productId <= 0) {
+            return;
+        }
+
+        if (storageContains(EVENTS.PRODUCT_VIEW, productDetail.productId, MARKETING_PLATFORM.FACEBOOK)) {
+            return;
+        }
+
+        pushIntoStorage(EVENTS.PRODUCT_VIEW, productDetail.productId, MARKETING_PLATFORM.FACEBOOK);
+        trackEventOnFacebook(EVENTS.PRODUCT_VIEW, productDetailToEvent(PAGE_TYPE.PRODUCT_PAGE, productDetail, MARKETING_PLATFORM.FACEBOOK));
+    }
+
+    /**
+     * Send event with cart content to google once.
+     * @param cart
+     */
+    function trackAddToCart(cart) {
+
+        if (getGoogleConversionId() == null || !cart || !cart.items || cart.items.length === 0) {
+            return;
+        }
+
+        var addToCartEvent = cartToAddToCartEvent(cart, MARKETING_PLATFORM.GOOGLE);
+        if (addToCartEvent) {
+            trackEventOnGoogle(EVENTS.ADD_TO_CART, addToCartEvent);
+        }
+    }
+
+    /**
+     * Send event with cart content to facebook once.
+     * @param cart
+     */
+    function trackAddToCartFacebook(cart) {
+
+        if (getFacebookPixelId() == null || !cart || !cart.items || cart.items.length === 0) {
+            return;
+        }
+
+        var addToCartEvent = cartToAddToCartEvent(cart, MARKETING_PLATFORM.FACEBOOK);
+        if (addToCartEvent) {
+            trackEventOnFacebook(EVENTS.ADD_TO_CART, addToCartEvent);
+        }
+    }
+
+    /**
+     * Send event with order to google once.
+     * @param order
+     */
+    function trackPurchase(order) {
+
+        if (getGoogleConversionId() == null || order.items[0] == null) {
+            return;
+        }
+
+        var purchaseEvent = orderToPurchaseEvent(order, MARKETING_PLATFORM.GOOGLE);
+        if (purchaseEvent != null) {
+            trackEventOnGoogle(EVENTS.PURCHASE, purchaseEvent);
+        }
+    }
+
+    /**
+     * Send event with order to facebook once.
+     * @param order
+     */
+    function trackPurchaseFacebook(order) {
+
+        if (getFacebookPixelId() == null || order.items[0] == null) {
+            return;
+        }
+
+        var purchaseEvent = orderToPurchaseEvent(order, MARKETING_PLATFORM.FACEBOOK);
+        if (purchaseEvent != null) {
+            trackEventOnFacebook(EVENTS.PURCHASE, purchaseEvent)
+        }
+    }
+
+    /**
+     * Transfer to google argument for gtag.js
+     * @param pageType PAGE_TYPE
+     * @param productDetail
+     * @param marketingPlatform FACEBOOK or GOOGLE
+     * @returns {*}
+     */
+    function productDetailToEvent(pageType, productDetail, marketingPlatform) {
+
+        switch (pageType) {
+            case PAGE_TYPE.PRODUCT_PAGE:
+                return productDetailForMarketingPlatform(productDetail, marketingPlatform);
+            default:
+                throw new Error('Unsupported page type when building google event ' + pageType);
+        }
+    }
+
+    function productDetailForMarketingPlatform(productDetail, marketingPlatform) {
+        switch (marketingPlatform) {
+            case MARKETING_PLATFORM.GOOGLE:
+                return {
+                    'dynx_itemid': productDetail.productId,
+                    'dynx_pagetype': 'offerdetail'
+                };
+            case MARKETING_PLATFORM.FACEBOOK:
+                return {
+                    'content_type': 'product',
+                    'content_ids': ["" + productDetail.productId],
+                    'owner': 'rh_easy'
+                };
+            default:
+                throw new Error('Unsupported marketing platform: ' + marketingPlatform);
+        }
+    }
+
+    function cartToAddToCartEvent(cart, marketingPlatform) {
+
+        var cartProductIds = [];
+        for (var i = 0; i < cart.items.length; i++) {
+
+            var cartItem = cart.items[i];
+            if (!storageContains(EVENTS.ADD_TO_CART, cartItem.product.id, marketingPlatform)) {
+                cartProductIds.push(cartItem.product.id);
+                pushIntoStorage(EVENTS.ADD_TO_CART, cartItem.product.id, marketingPlatform);
+            }
+        }
+
+        if (cartProductIds.length === 0) {
+            return null;
+        } else {
+            return addToCartEventForMarketingPlatform(cartProductIds, marketingPlatform);
+        }
+    }
+
+    function addToCartEventForMarketingPlatform(cartProductIds, marketingPlatform) {
+        switch (marketingPlatform) {
+            case MARKETING_PLATFORM.GOOGLE:
+                return {
+                    'dynx_itemid': cartProductIds,
+                    'dynx_pagetype': 'conversionintent'
+
+                };
+            case MARKETING_PLATFORM.FACEBOOK:
+                return {
+                    'content_type': 'product',
+                    'content_ids': cartProductIds.map(String),
+                    'owner': 'rh_easy'
+                };
+            default:
+                throw new Error('Unsupported marketing platform: ' + marketingPlatform);
+        }
+    }
+
+    function orderToPurchaseEvent(order, marketingPlatform) {
+
+        var orderProductIds = [];
+        for (var i = 0; i < order.items.length; i++) {
+            orderProductIds.push(order.items[i].product.id);
+        }
+
+        if (orderProductIds.length === 0 || storageContains(EVENTS.PURCHASE, order.orderNumber, marketingPlatform)) {
+            return null;
+        } else {
+            pushIntoStorage(EVENTS.PURCHASE, order.orderNumber, marketingPlatform);
+            return orderToPurchaseEventForMarketingPlatform(order, orderProductIds, marketingPlatform);
+        }
+    }
+
+    function orderToPurchaseEventForMarketingPlatform(order, orderProductIds, marketingPlatform) {
+        var storeCurrency = getStoreCurrency();
+        var purchaseEvent;
+
+        switch (marketingPlatform) {
+            case MARKETING_PLATFORM.GOOGLE:
+                purchaseEvent = {
+                    'dynx_itemid': orderProductIds,
+                    'dynx_pagetype': 'conversion',
+                    'dynx_totalvalue': order.subtotal,
+                    'value' : order.subtotal,
+                    'transaction_id': order.orderNumber
+                };
+
+                break;
+            case MARKETING_PLATFORM.FACEBOOK:
+                purchaseEvent = {
+                    'content_type': 'product',
+                    'content_ids': orderProductIds.map(String),
+                    'value': order.subtotal,
+                    'num_items': orderProductIds.length,
+                    'owner': 'rh_easy'
+                };
+
+                break;
+            default:
+                throw new Error('Unsupported marketing platform: ' + marketingPlatform);
+        }
+
+        if (storeCurrency) {
+            purchaseEvent['currency'] = storeCurrency;
+        }
+
+        return purchaseEvent;
+    }
+
+    /**
+     * Send ViewContent event to google
+     * @param event
+     * @param googleEvent
+     */
+    function trackEventOnGoogle(event, googleEvent) {
+
+        var conversionId = getGoogleConversionId();
+        var conversionLabel = getGoogleConversionLabel();
+
+        var sendToGoogleObject = 'AW-' + conversionId;
+        if (event === EVENTS.PURCHASE) {
+            sendToGoogleObject += '/' + conversionLabel;
+        }
+
+        googleEvent.send_to = sendToGoogleObject;
+
+        loadScriptAsyncOnce(
+            'https://www.googletagmanager.com/gtag/js?id=AW-' + conversionId,
+            function () {
+                window.dataLayer = window.dataLayer || [];
+
+                function gtag() {
+                    dataLayer.push(arguments);
+                }
+
+                gtag('js', new Date());
+                gtag('config', 'AW-' + conversionId);
+            },
+            function () {
+                function gtag() {
+                    dataLayer.push(arguments);
+                }
+
+                gtag('event', event.eventName, googleEvent);
+            },
+            event);
+    }
+
+    function trackEventOnFacebook(event, facebookEvent) {
+        var facebookPixelId = getFacebookPixelId();
+        var fbPixelUrl = getFacebookPixelUrl();
+        var fbPixelScript = getFacebookPixelScript();
+
+        if (FB_PIXEL_INJECTED == null) {
+            FB_PIXEL_INJECTED = isOurPixelInjectedByPlatform();
+        }
+
+        if (!FB_PIXEL_INJECTED && isAllowedToTrackEvent()) {
+
+            var newNode = document.createElement('script');
+            newNode.type = 'text/javascript';
+            newNode.innerHTML = fbPixelScript;
+
+            var existingNode = document.getElementsByTagName('script')[0];
+            existingNode.parentNode.insertBefore(newNode, existingNode);
+
+            var newNodeNoScript = document.createElement('noscript');
+            newNodeNoScript.innerHTML = '<img src="' + fbPixelUrl + '" height="1" width="1" style="display: none"/>';
+
+            newNode.parentNode.insertBefore(newNodeNoScript, newNode);
+
+            FB_PIXEL_INJECTED = true;
+        }
+
+        if (isAllowedToTrackEvent()) {
+            fbq('trackSingle', facebookPixelId, event.fbEventName, facebookEvent);
+        }
+    }
+
+    /**
+     * Load async script only once and run callbacks. We use this for load gtag.js, init gtag and send event to google.
+     * For purchase event we always have to load setup config: `gtag('config', conversionId/conversionLabel);`
+     * @param scriptUrl url of the base script
+     * @param setupOnceCallback this code should be run only once
+     * @param afterLoadAlwaysCallback this code should be run always, but after setupOnceCallback callback
+     * @param event Type of event to track.
+     */
+    function loadScriptAsyncOnce(scriptUrl, setupOnceCallback, afterLoadAlwaysCallback, event) {
+
+        //script is already loaded, we can directly call callback, purchase event is exception
+        if (LOADED_SCRIPTS.includes(scriptUrl)) {
+            if (event === EVENTS.PURCHASE) {    //always load config with conversion label for purchase event
+                setupOnceCallback();
+            }
+            afterLoadAlwaysCallback();
+            return;
+        }
+
+        var newNode = document.createElement('script');
+        newNode.type = 'text/javascript';
+        newNode.src = scriptUrl;
+        newNode.onload = newNode.onreadystatechange = function () {
+            if (!this.readyState || this.readyState === 'complete') {
+                if (!LOADED_SCRIPTS.includes(scriptUrl)) {
+                    setupOnceCallback();
+                    LOADED_SCRIPTS.push(scriptUrl);
+                } else if (event === EVENTS.PURCHASE) {    //always load config with conversion label for purchase event
+                    setupOnceCallback();
+                }
+                afterLoadAlwaysCallback();
+            }
+        };
+
+        var existingNode = document.getElementsByTagName('script')[0];
+        existingNode.parentNode.insertBefore(newNode, existingNode);
+    }
+
+    /**
+     * Conversion id or null if doesn't exist.
+     * @returns {*}
+     */
+    function getGoogleConversionId() {
+        var storage = getEcwidStorage();
+        if (storage !== null) {
+            return getEcwidStorage().conversionId;
+        } else {
+            return null;
+        }
+    }
+
+
+    /**
+     * Conversion label or null if doesn't exist.
+     * @returns {*}
+     */
+    function getGoogleConversionLabel() {
+        var storage = getEcwidStorage();
+        if (storage !== null) {
+            return getEcwidStorage().conversionLabel;
+        } else {
+            return null;
+        }
+    }
+
+    /**
+     * Store currency or null if it's not set.
+     * @returns {*}
+     */
+    function getStoreCurrency() {
+        var storage = getEcwidStorage();
+        if (storage !== null) {
+            return getEcwidStorage().websiteCurrency;
+        } else {
+            return null;
+        }
+    }
+
+    /**
+     * Facebook pixel id or null if doesn't exist
+     * @returns {*}
+     */
+    function getFacebookPixelId() {
+        var storage = getEcwidStorage();
+        return storage !== null
+            ? storage.fbPixelId
+            : null;
+    }
+
+    function getFacebookPixelScript() {
+        var ecwidPixelIdentification = isAnyPixelInjectedByPlatform()
+            ? ''
+            : ECWID_PIXEL_IDENTIFICATION_PARAMETER;
+
+        var fbPixelId = getFacebookPixelId();
+
+        return '!function(f,b,e,v,n,t,s)\n' +
+            '  {if(f.fbq)return;n=f.fbq=function(){n.callMethod?\n' +
+            '  n.callMethod.apply(n,arguments):n.queue.push(arguments)};\n' +
+            '  if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version=\'2.0\';\n' +
+            '  n.queue=[];t=b.createElement(e);t.async=!0;\n' +
+            '  t.src=v;s=b.getElementsByTagName(e)[0];\n' +
+            '  s.parentNode.insertBefore(t,s)}(window, document,\'script\',\n' +
+            '  \'https://connect.facebook.net/en_US/fbevents.js\');\n' +
+            '  fbq(\'init\', \'' + fbPixelId + '\'' + ecwidPixelIdentification + ');\n' +
+            '  fbq(\'trackSingle\', \'' + fbPixelId + '\', \'PageView\');';
+    }
+
+    function getFacebookPixelUrl() {
+        return 'https://www.facebook.com/tr?id=' + getFacebookPixelId() + '&ev=PageView&noscript=1';
+    }
+
+    /**
+     * Facebook pixel id stored in Ecwid store setting or null if not set
+     * @returns {*}
+     */
+    function getFacebookPixelIdFromEcwidSettings() {
+        var storage = getEcwidStorage();
+        return storage !== null
+            ? storage.fbPixelIdInsertedByEcwid
+            : null;
+    }
+
+    /**
+     * Get true if pixel is injected by platform
+     */
+    function isOurPixelInjectedByPlatform() {
+        var storage = getEcwidStorage();
+        var fbPixelId = getFacebookPixelId();
+
+        return storage !== null && fbPixelId !== null && fbPixelId === getFacebookPixelIdFromEcwidSettings();
+    }
+
+    function isAnyPixelInjectedByPlatform() {
+        var fbPixelIdFromEcwidStoreSettings = getFacebookPixelIdFromEcwidSettings();
+
+        return fbPixelIdFromEcwidStoreSettings !== null && fbPixelIdFromEcwidStoreSettings !== 'PIXEL';
+    }
+
+    /**
+     * Decide if we should fire events to pixel (when conversion version is not V_1 or V_2)
+     */
+    function isAllowedToTrackEvent() {
+        var storage = getEcwidStorage();
+
+        return storage !== null && storage.fbConversionVersion !== null && !VERSIONS_WITH_ECWID_PIXEL_INSERTED.includes(storage.fbConversionVersion);
+    }
+
+    /**
+     * Our app public config or null if doesn't exist.
+     * @returns {*}
+     */
+    function getEcwidStorage() {
+
+        var appConfig = Ecwid.getAppPublicConfig('roi-hunter');
+        if (appConfig === null) {
+            appConfig = Ecwid.getAppPublicConfig('roi-hunter-sandbox');
+            if (appConfig !== null) {
+                console.log('Staging app config is loaded. Data: ', appConfig);
+            }
+        }
+        return JSON.parse(appConfig);
+    }
+
+    /**
+     * Push ids to cookies.
+     * @param event type to store
+     * @param idToAdd product id
+     * @param marketingPlatform FACEBOOK OR GOOGLE
+     */
+    function pushIntoStorage(event, idToAdd, marketingPlatform) {
+
+        function pushIntoCookies(event, idToAdd, marketingPlatform) {
+            var cookieName = getRhEasyCookieName(marketingPlatform, event);
+
+            var data = Cookies.get(cookieName);
+            if (data != null) {
+                data = JSON.parse(data);
+            }
+            if (data != null) {
+                data.push(idToAdd);
+            } else {
+                data = [idToAdd];
+            }
+            Cookies.set(cookieName, JSON.stringify(data), {expires: event.cookieExpiration})
+        }
+
+        function pushIntoLocalArray(event, idToAdd) {
+            switch (event) {
+                case EVENTS.PRODUCT_VIEW:
+                    return VIEWED_PRODUCT_IDS.push(idToAdd);
+                case EVENTS.ADD_TO_CART:
+                    return CART_PRODUCT_IDS.push(idToAdd);
+                case EVENTS.PURCHASE:
+                    return PURCHASE_PRODUCT_IDS.push(idToAdd);
+                default:
+                    throw new Error('Unsupported event ' + event);
+            }
+        }
+
+        if (isCookieEnabled()) {
+            pushIntoCookies(event, idToAdd, marketingPlatform);
+        } else {
+            pushIntoLocalArray(event, idToAdd);
+        }
+    }
+
+    /**
+     * Push ids to cookies.
+     * @param event type to get
+     * @param idToGet id to find
+     * @param marketingPlatform FACEBOOK OR GOOGLE
+     */
+    function storageContains(event, idToGet, marketingPlatform) {
+
+        function cookiesContains(event, idToGet, marketingPlatform) {
+            var data = Cookies.get(getRhEasyCookieName(marketingPlatform, event));
+            if (data != null) {
+                data = JSON.parse(data);
+            }
+            return data != null && data.includes(idToGet);
+        }
+
+        function localArrayContains(event, idToGet) {
+
+            switch (event) {
+                case EVENTS.PRODUCT_VIEW:
+                    return VIEWED_PRODUCT_IDS.includes(idToGet);
+                case EVENTS.ADD_TO_CART:
+                    return CART_PRODUCT_IDS.includes(idToGet);
+                case EVENTS.PURCHASE:
+                    return PURCHASE_PRODUCT_IDS.includes(idToGet);
+                default:
+                    throw new Error('Unsupported event ' + event);
+            }
+        }
+
+        if (isCookieEnabled()) {
+            return cookiesContains(event, idToGet, marketingPlatform);
+        } else {
+            return localArrayContains(event, idToGet);
+        }
+    }
+
+    function getRhEasyCookieName(marketingPlatform, event) {
+        return RH_EASY_COOKIE_NAME + '_' + marketingPlatform + '_' + event.cookieName;
+    }
+
+    function isCookieEnabled() {
+        return navigator.cookieEnabled;
+    }
+
+    function initCookies() {
+
+        // cookies package https://www.npmjs.com/package/cookies
+        (function (d, f) {
+            "use strict";
+            var h = function (d) {
+                if ("object" !== typeof d.document) throw Error("Cookies.js requires a `window` with a `document` object");
+                var b = function (a, e, c) {
+                    return 1 === arguments.length ? b.get(a) : b.set(a, e, c)
+                };
+                b._document = d.document;
+                b._cacheKeyPrefix = "cookey.";
+                b._maxExpireDate = new Date("Fri, 31 Dec 9999 23:59:59 UTC");
+                b.defaults = {path: "/", secure: !1};
+                b.get = function (a) {
+                    b._cachedDocumentCookie !== b._document.cookie && b._renewCache();
+                    a = b._cache[b._cacheKeyPrefix + a];
+                    return a === f ? f : decodeURIComponent(a)
+                };
+                b.set = function (a, e, c) {
+                    c = b._getExtendedOptions(c);
+                    c.expires = b._getExpiresDate(e === f ? -1 : c.expires);
+                    b._document.cookie = b._generateCookieString(a, e, c);
+                    return b
+                };
+                b.expire = function (a, e) {
+                    return b.set(a, f, e)
+                };
+                b._getExtendedOptions = function (a) {
+                    return {
+                        path: a && a.path || b.defaults.path,
+                        domain: a && a.domain || b.defaults.domain,
+                        expires: a && a.expires || b.defaults.expires,
+                        secure: a && a.secure !== f ? a.secure : b.defaults.secure
+                    }
+                };
+                b._isValidDate = function (a) {
+                    return "[object Date]" === Object.prototype.toString.call(a) && !isNaN(a.getTime())
+                };
+                b._getExpiresDate = function (a, e) {
+                    e = e || new Date;
+                    "number" === typeof a ? a = Infinity === a ? b._maxExpireDate : new Date(e.getTime() + 1E3 * a) : "string" === typeof a && (a = new Date(a));
+                    if (a && !b._isValidDate(a)) throw Error("`expires` parameter cannot be converted to a valid Date instance");
+                    return a
+                };
+                b._generateCookieString = function (a, b, c) {
+                    a = a.replace(/[^#$&+\^`|]/g, encodeURIComponent);
+                    a = a.replace(/\(/g, "%28").replace(/\)/g, "%29");
+                    b = (b + "").replace(/[^!#$&-+\--:<-\[\]-~]/g, encodeURIComponent);
+                    c = c || {};
+                    a = a + "=" + b + (c.path ? ";path=" +
+                        c.path : "");
+                    a += c.domain ? ";domain=" + c.domain : "";
+                    a += c.expires ? ";expires=" + c.expires.toUTCString() : "";
+                    return a += c.secure ? ";secure" : ""
+                };
+                b._getCacheFromString = function (a) {
+                    var e = {};
+                    a = a ? a.split("; ") : [];
+                    for (var c = 0; c < a.length; c++) {
+                        var d = b._getKeyValuePairFromCookieString(a[c]);
+                        e[b._cacheKeyPrefix + d.key] === f && (e[b._cacheKeyPrefix + d.key] = d.value)
+                    }
+                    return e
+                };
+                b._getKeyValuePairFromCookieString = function (a) {
+                    var b = a.indexOf("="), b = 0 > b ? a.length : b, c = a.substr(0, b), d;
+                    try {
+                        d = decodeURIComponent(c)
+                    } catch (k) {
+                        console && "function" ===
+                        typeof console.error && console.error('Could not decode cookie with key "' + c + '"', k)
+                    }
+                    return {key: d, value: a.substr(b + 1)}
+                };
+                b._renewCache = function () {
+                    b._cache = b._getCacheFromString(b._document.cookie);
+                    b._cachedDocumentCookie = b._document.cookie
+                };
+                b._areEnabled = function () {
+                    var a = "1" === b.set("cookies.js", 1).get("cookies.js");
+                    b.expire("cookies.js");
+                    return a
+                };
+                b.enabled = b._areEnabled();
+                return b
+            };
+            d.Cookies = d && "object" === typeof d.document ? h(d) : h;
+        })("undefined" === typeof window ? this : window);
+    }
+})();

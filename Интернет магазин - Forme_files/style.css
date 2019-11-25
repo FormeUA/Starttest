@@ -1,0 +1,11 @@
+button.view-invoice {
+	float: right;
+}
+
+.ecwid-lte-480px button.view-invoice {
+	margin: 0px auto !important;
+    display: block !important;
+    float: none;
+    top: 5px;
+    position: relative;
+}
